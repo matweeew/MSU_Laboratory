@@ -1,0 +1,3 @@
+/home/grmtveeen/atom_profiles/CMakeFiles/atom_profiles.dir
+/home/grmtveeen/atom_profiles/CMakeFiles/edit_cache.dir
+/home/grmtveeen/atom_profiles/CMakeFiles/rebuild_cache.dir

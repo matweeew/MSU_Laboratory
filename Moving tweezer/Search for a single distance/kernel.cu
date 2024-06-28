@@ -12,7 +12,7 @@
 #include <random>
 
 
-#define max_thread 256              //max thread for CUDA
+//#define max_thread 256              //max thread for CUDA
 #define vec_size 4                  //max degree of polynomial
 #define dim 2*3                     //3 dimensions problem
 #define eq_const 7.895683520871486  //2*10^(-3)/(mm*m/(ko))
@@ -369,7 +369,7 @@ void calculate_p_e(double S, int alive_cnt)
     cudaMemcpy(inputInitialDataOnDevice, inputInitialDataOnHost, Np, cudaMemcpyHostToDevice);
 
     //запуск ядра
-    distributor_P << <40960, 256 >> > (S, inputDataOnDevice, inputInitialDataOnDevice, resultOnDevice, init_population, n, N);
+    distributor_P << <40960, 256 >> > (S, inputDataOnDevice, inputInitialDataOnDevice, resultOnDevice, init_population, N);
 
     //копирование результатов на хост и привязка к указателю тут resultOnHost
     cudaMemcpy(resultOnHost, resultOnDevice, Nb, cudaMemcpyDeviceToHost);

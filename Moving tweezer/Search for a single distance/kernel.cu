@@ -1,11 +1,11 @@
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+/*#include "cuda_runtime.h"
+#include "device_launch_parameters.h"*/
 #include <map>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <curand.h>
-#include <curand_kernel.h>
+//#include <curand.h>
+//#include <curand_kernel.h>
 #include <assert.h>
 #include <cmath>
 #include <iostream>
@@ -15,7 +15,7 @@
 #define max_thread 256              //max thread for CUDA
 #define vec_size 4                  //max degree of polynomial
 #define dim 2*3                     //3 dimensions problem
-#define eq_const 32.89868133696453  //2*10^(-3)/(mm*m/(ko))
+#define eq_const 7.895683520871486//32.89868133696453  //2*10^(-3)/(mm*m/(ko))
 #define tweezer_width 1.0           //mkm
 #define translate_const 13.112635299027149 //in parrots
 #define Zr 3.717861128508631        //mkm
@@ -30,7 +30,7 @@ constexpr auto population = 1000;
 constexpr auto size_target = population * 100;
 /////////////////////////////////////////////////////////////////////
 
-__device__ double p(double t, double* vec)
+double p(double t, double* vec)
 {
     double res = 0;
     for (int i = 0; i < vec_size; i++) res += (vec[i] / ((double)(i + 1))) * pow(t, i + 1);
@@ -38,7 +38,7 @@ __device__ double p(double t, double* vec)
 }
 
 
-__device__ double dp(double t, double* vec)
+double dp(double t, double* vec)
 {
     double res = 0;
     for (int i = 0; i < vec_size; i++) res += vec[i] * pow(t, i);
@@ -46,7 +46,7 @@ __device__ double dp(double t, double* vec)
 }
 
 
-__device__ double P(double t, double* vec, double move_time, double s)
+double P(double t, double* vec, double move_time, double s)
 {
     if (t < move_time / 2.0)   return s / 2.0 - p(move_time / 2.0 - t, vec);
     else                  return s / 2.0 + p(t - move_time / 2.0, vec);
@@ -54,26 +54,27 @@ __device__ double P(double t, double* vec, double move_time, double s)
 
 
 
-__device__ double to_double(int a, int b)
+double to_double(int a, int b)
 {
     return ((double)(a) / (double)(b));
 }
 
 
-__device__ double width(double z)
+double width(double z)
 {
     return tweezer_width*sqrt(1+pow(z/Zr,2));
 }
 
-__device__ double potential(double x, double y, double z)
+double potential(double x, double y, double z)
 {
     return - U0 * pow(tweezer_width/width(z),2) * exp(-2*(pow(x,2)+pow(y,2))/pow(width(z),2));
 }
 
 
-__device__ void f(double t, double* coord, double move_time, double* F, double* vec, double s)
+void f(double t, double* coord, double move_time, double* F, double* vec, double s)
 {
     double dx = P(t,vec,move_time,s);
+    //std::cout<<potential(coord[0]-dx,coord[2],coord[4])<<std::endl;
     F[0] = coord[1];
     F[1] = 4 * ((coord[0] - dx) / pow(width(coord[4]),2)) * eq_const/2 * potential(coord[0]-dx,coord[2],coord[4]);
     F[2] = coord[3];
@@ -82,7 +83,7 @@ __device__ void f(double t, double* coord, double move_time, double* F, double* 
     F[5] = -(2 *coord[4] / pow(Zr,2))* pow(tweezer_width/width(coord[4]),2)*(2*((pow(coord[0]-dx,2)+pow(coord[2],2))/pow(width(coord[4]),2))-1)*eq_const/2*potential(coord[0]-dx,coord[2],coord[4]);
 }
 
-__device__ void increment(double t, double* atom_coordinates, double move_time, double s, double tau, double* vec)
+void increment(double t, double* atom_coordinates, double move_time, double s, double tau, double* vec)
 {
     double K[6][dim] = {0};
     double F[dim] = {0};
@@ -152,7 +153,7 @@ __device__ void increment(double t, double* atom_coordinates, double move_time, 
     for (int i = 0; i < dim; i++) atom_coordinates[i] += to_double(16, 135) * K[0][i] + to_double(6656, 12825) * K[2][i] + to_double(28561, 56430) * K[3][i] - to_double(9, 50) * K[4][i] + to_double(2, 55) * K[5][i];
 }
 
-__device__ void rungeKutta(double s, double move_time, double* atom_coordinates, double t0, double tau, double* vec)
+void rungeKutta(double s, double move_time, double* atom_coordinates, double t0, double tau, double* vec)
 {
     while (t0 < move_time)
     {
@@ -163,14 +164,14 @@ __device__ void rungeKutta(double s, double move_time, double* atom_coordinates,
 }
 
 
-__device__ double energy(double* coord, double move_time, double* vec, double s)
+double energy(double* coord, double move_time, double* vec, double s)
 {
     double dx = P(move_time,vec,move_time,s);
     return (pow((coord[1]), 2) + pow(coord[3], 2) + pow(coord[5], 2)) + eq_const * potential(coord[0]-dx,coord[2],coord[4]);
 }
 
 
-__device__ double newton_search(double a, double b, double EPS, double* vec, double s)
+double newton_search(double a, double b, double EPS, double* vec, double s)
 {
     double Xnn = 3 * EPS, Xn = b, X = EPS;
     while (fabs(Xnn - X) > EPS) {
@@ -182,7 +183,7 @@ __device__ double newton_search(double a, double b, double EPS, double* vec, dou
 }
 
 
-__device__ double get_move_time(double s, double Tmax, double tau, double EPS, double* vec)
+double get_move_time(double s, double Tmax, double tau, double EPS, double* vec)
 {
     double ans, t = 0;
     while (t < Tmax)
@@ -200,22 +201,26 @@ __device__ double get_move_time(double s, double Tmax, double tau, double EPS, d
 }
 
 
-__device__ double optimization_f(double s, double* E, double* vec)
+double optimization_f(double s, double* E, double* vec)
 {
-    double move_time = 0, tau = 0.01, EPS = 1e-06, lim = 0.88664120885, Tmax = 10;//0.07218 * s + 1.46378;///////!!!!!!!
+    double move_time = 0, tau = 0.01, EPS = 1e-06, lim = 0.88664120885, Tmax = 100;//0.07218 * s + 1.46378;///////!!!!!!!
     move_time = get_move_time(s, Tmax, tau, EPS, vec);
+    std::cout<<"this time = "<<move_time<<std::endl;
     if (move_time != -1)
     {
         double coord[dim] = {0}, t0 = 0;
         rungeKutta(s, move_time, coord, t0, tau, vec);
         *E = energy(coord, move_time, vec, s);
+        /*for(int i = 0; i < dim; i++)
+            std::cout<<coord[i]<<" ";
+        std::cout<<std::endl;*/
         if (*E < (-lim * U0)) return move_time;
     }
     return -1;
 }
 
 
-__global__ void distributor(double s, double* data, double* output, int max_thread)
+/*void distributor(double s, double* data, double* output)
 {
     int threadLinearIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (threadLinearIdx < max_thread)
@@ -229,10 +234,10 @@ __global__ void distributor(double s, double* data, double* output, int max_thre
         output[2 * threadLinearIdx + 1] = end_energy;
         free(vec);
     }
-}
+}*/
 
 
-__device__ double get_P(double s, double* sample, int sample_size, double move_time, double* avarage_energy, double* vec)
+double get_P(double s, double* sample, int sample_size, double move_time, double* avarage_energy, double* vec)
 {
     double coord[dim]={0}, t0 = 0, current_energy = 0, tau = 0.01;
     double successes = 0;
@@ -241,6 +246,9 @@ __device__ double get_P(double s, double* sample, int sample_size, double move_t
     {
         for (int j = 0; j < dim; j++) coord[j] = sample[i * dim + j];
         rungeKutta(s, move_time, coord, t0, tau, vec);
+        for(int i = 0; i < dim; i++)
+            std::cout<<coord[i]<<" ";
+        std::cout<<std::endl;
         current_energy = energy(coord, move_time, vec, s);
         if (current_energy < 0)
         {
@@ -254,7 +262,7 @@ __device__ double get_P(double s, double* sample, int sample_size, double move_t
 }
 
 
-__global__ void distributor_P(double s, double* data, double* sample, double* output, int sample_size, int max_thread)
+/*void distributor_P(double s, double* data, double* sample, double* output, int sample_size)
 {
     int threadLinearIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (threadLinearIdx < max_thread)
@@ -274,10 +282,27 @@ __global__ void distributor_P(double s, double* data, double* sample, double* ou
         output[vec_size * threadLinearIdx + 3] = avarage_energy;
         free(vec);
     }
+}*/
+
+int main()
+{
+    double s = 5.0, Tmax = 100.0, tau = 0.01, EPS = 1e-6, move_time, energy, p;
+    double vec[4] = {0.652165,0.0,0.0,0.0};
+    double sample[dim] = {0.6519,0.896127,-0.147983,0.254793,-1.25651465,0.012541};
+    //move_time = get_move_time(s, Tmax, tau, EPS, vec);
+    //energy(double* coord, double move_time, double* vec, double s)
+    //double F[6]={0}, coord[6] = {-0.97,0.1,0.83,0.1,0.954,0.1};
+    //f(0.56, coord, move_time, F, vec, s);
+    //for(int i = 0; i < dim; i++)
+    //    std::cout<<F[i]<<std::endl;
+    //std::cout<<move_time<<std::endl;
+    move_time = optimization_f(s, &energy, vec);
+    p = get_P(s, sample, 1, move_time, &energy, vec);
+    std::cout<<p<<std::endl;
+    return 0;
 }
 
-
-double get_nearest_coordinate(double coordinate, double grid)
+/*double get_nearest_coordinate(double coordinate, double grid)
 {
     return round(coordinate / grid) * grid;
 }
@@ -707,4 +732,4 @@ int main()
     fclose(file);
 
     return 0;
-}
+}*/

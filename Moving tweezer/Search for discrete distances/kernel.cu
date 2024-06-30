@@ -1,4 +1,4 @@
-﻿#include "cuda_runtime.h"
+#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <map>
 #include <stdio.h>
@@ -12,58 +12,56 @@
 #include <random>
 
 
-#define dimension 6                             //размерность фазового пространства атома
-#define vec 4                                   //полином какой степени ищется//НЕ ЗАБУДЬ ГЕНЕРАТОРЫ ПОПРАВИТЬ ТОГДА
-#define grid_step 0.1                           //шаг сетки в пространстве полиномов
+#define grid_step 0.5
 #define number_of_eras 10                       //кол-во циклов (шагов) по сетке от начальной точки
-constexpr auto population = 10000;              //кол-во генерируемых/проверяемых точек
-constexpr auto size_target = population * 100;  //забыл что это но работает так норм
+constexpr auto population = 1000;
+constexpr auto size_target = population * 100;
 
-#define w0 1.5                      //ширина перетяжки
-#define Zr 8.31598055362004         //ширина по оси Z
-#define CONST_N 0.09566840431136607 //размерная константа равная 10^(-3)*k/(m*mm) (используется в ураынении Ньютона)
-#define U 4.0                       //глубина пинцета (нормированная на постоянную Больцмана, задается в мК)
-#define CONST_E 5.22638590660173    //размерная константа равная  m*mm/(2*10^(-3)*k) (используется для вычисления энергии в мК)
 
-#define tau 0.01            //шаг в Рунге-Кутта при решении уравнения Ньютона
-#define EPS 1e-06           //точность в мкс, с которой определяется tEnd
-#define lim 0.5			    //процент от начальной глубины, для предварительной фильтрации.
-#define CONST_k 1.53846     //это две константы для более точного задания максимального времени Tmax перемещения атома,
-#define CONST_b 9.53846		//т.к. время перемещения зависит от расстояния перемещения s (просто глянь где это используются)
+#define vec_size 4                  //max degree of polynomial
+#define dim 2*3                     //3 dimensions problem
+#define eq_const 7.895683520871486  //2*10^(-3)/(mm*m/(ko))
+#define tweezer_width 1.0           //mkm
+#define translate_const 13.112635299027149 //in parrots
+#define Zr 3.717861128508631        //mkm
+#define U0 5.0                      //mK
 
-#define Sinit 5.2			//поиск оптимального профиля начнется для расстояния перемещения Sinit
-#define Smax 3.3			//максимальное расстояние перемещения, для которого будет произведенга оптимизация
+
+#define Sinit 3.0			//поиск оптимального профиля начнется для расстояния перемещения Sinit
+#define Smax 15.0			//максимальное расстояние перемещения, для которого будет произведенга оптимизация
 #define dS 0.1				//шаг по S
 
-#define init_point_1 0.635516//0.64//0.397023//0.64;//0.936040//0.64
-#define init_point_2 0.288374//0.0//0.896440//0.0//0.0;//-0.011395
-#define init_point_3 -0.253893//0.0//-0.459227//0.0//0.0;//-0.125110
-#define init_point_4 0.040322//0.0//0.055564//0.0//0.0;//0.022031
+
+#define init_point_1 0.691200//0.64//0.397023//0.64;//0.936040//0.64
+#define init_point_2 38.850753//0.0//0.896440//0.0//0.0;//-0.011395
+#define init_point_3 -168.382466//0.0//-0.459227//0.0//0.0;//-0.125110
+#define init_point_4 176.389313//0.0//0.055564//0.0//0.0;//0.022031
 #define init_point_5 0.0
 #define init_point_6 0.0
 
 
-__device__ double p(double t, double* vector, int n)
+__device__ double p(double t, double* vec)
 {
     double res = 0;
-    for (int i = 0; i < n; i++) res += (vector[i] / ((double)(i + 1))) * pow(t, i + 1);
+    for (int i = 0; i < vec_size; i++) res += (vec[i] / ((double)(i + 1))) * pow(t, i + 1);
     return res;
 }
 
 
-__device__ double dp(double t, double* vector, int n)
+__device__ double dp(double t, double* vec)
 {
     double res = 0;
-    for (int i = 0; i < n; i++) res += vector[i] * pow(t, i);
+    for (int i = 0; i < vec_size; i++) res += vec[i] * pow(t, i);
     return res;
 }
 
 
-__device__ double P(double t, double* vector, int n, double tEnd, double s)
+__device__ double P(double t, double* vec, double move_time, double s)
 {
-    if (t < tEnd / 2.0)   return s / 2.0 - p(tEnd / 2.0 - t, vector, n);
-    else                  return s / 2.0 + p(t - tEnd / 2.0, vector, n);
+    if (t < move_time / 2.0)   return s / 2.0 - p(move_time / 2.0 - t, vec);
+    else                  return s / 2.0 + p(t - move_time / 2.0, vec);
 }
+
 
 
 __device__ double to_double(int a, int b)
@@ -72,212 +70,219 @@ __device__ double to_double(int a, int b)
 }
 
 
-__device__ double w(double z)
+__device__ double width(double z)
 {
-    return w0*sqrt(1+pow(z/Zr, 2));
+    return tweezer_width*sqrt(1+pow(z/Zr,2));
+}
+
+__device__ double potential(double x, double y, double z)
+{
+    return - U0 * pow(tweezer_width/width(z),2) * exp(-2*(pow(x,2)+pow(y,2))/pow(width(z),2));
 }
 
 
-__device__ double exp_func(double x, double y, double z)
+__device__ void f(double t, double* coord, double move_time, double* F, double* vec, double s)
 {
-    return exp( -2*(pow(x,2)+pow(y,2))/(pow(w(z),2)));
+    double dx = P(t,vec,move_time,s);
+    F[0] = coord[1];
+    F[1] = 4 * ((coord[0] - dx) / pow(width(coord[4]),2)) * eq_const/2 * potential(coord[0]-dx,coord[2],coord[4]);
+    F[2] = coord[3];
+    F[3] = 4 * (coord[2] / pow(width(coord[4]),2)) * eq_const/2 * potential(coord[0]-dx,coord[2],coord[4]);
+    F[4] = coord[5];
+    F[5] = -(2 *coord[4] / pow(Zr,2))* pow(tweezer_width/width(coord[4]),2)*(2*((pow(coord[0]-dx,2)+pow(coord[2],2))/pow(width(coord[4]),2))-1)*eq_const/2*potential(coord[0]-dx,coord[2],coord[4]);
 }
 
-
-__device__ double dU_dx(double x, double y, double z)
+__device__ void increment(double t, double* atom_coordinates, double move_time, double s, double tau, double* vec)
 {
-    return 4*(pow(w0,2)/pow(w(z),4))*x*exp_func(x,y,z);
-}
-
-
-__device__ double dU_dy(double x, double y, double z)
-{
-    return 4*(pow(w0,2)/pow(w(z),4))*y*exp_func(x,y,z);
-}
-
-
-__device__ double dU_dz(double x, double y, double z)
-{
-    return 2*pow((w0/w(z)),4)*(z/pow(Zr,2))*(1-2*((pow(x,2)+pow(y,2))/pow(w(z),2)))*exp_func(x,y,z);
-}
-
-
-__device__ void f(double t, double* XY, double tEnd, double s, double* F, double* vector, int n)
-{
-    F[0] = XY[1];
-    F[1] = -CONST_N*U*dU_dx(XY[0]-P(t,vector,n,tEnd,s),XY[2],XY[4]);
-    F[2] = XY[3];
-    F[3] = -CONST_N*U*dU_dy(XY[0]-P(t,vector,n,tEnd,s),XY[2],XY[4]);
-    F[4] = XY[5];
-    F[5] = -CONST_N*U*dU_dz(XY[0]-P(t,vector,n,tEnd,s),XY[2],XY[4]);
-
-}
-
-
-__device__ void increment(double t, double* XY, double tEnd, double s, double step, double* vector, int n)
-{
-    double K[6][dimension] = { 0 };
-    double F[dimension] = { 0 };
-    double outXY[dimension] = { 0 };
+    double K[6][dim] = {0};
+    double F[dim] = {0};
+    double outXY[dim] = {0};
 
     //K1 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i];
-    f(t, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[0][i] = step * F[i];
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i];
+    f(t, outXY, move_time, F, vec, s);
+    K[0][0] = tau * F[0];
+    K[0][1] = tau * F[1];
+    K[0][2] = tau * F[2];
+    K[0][3] = tau * F[3];
+    K[0][4] = tau * F[4];
+    K[0][5] = tau * F[5];
 
     //K2 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i] + to_double(1, 4) * K[0][i];
-    f(t + to_double(1, 4) * step, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[1][i] = step * F[i];
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i] + to_double(1, 4) * K[0][i];
+    f(t + to_double(1, 4) * tau, outXY, move_time, F, vec, s);
+    K[1][0] = tau * F[0];
+    K[1][1] = tau * F[1];
+    K[1][2] = tau * F[2];
+    K[1][3] = tau * F[3];
+    K[1][4] = tau * F[4];
+    K[1][5] = tau * F[5];
 
     //K3 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i] + to_double(3, 32) * K[0][i] + to_double(9, 32) * K[1][i];
-    f(t + to_double(3, 8) * step, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[2][i] = step * F[i];
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i] + to_double(3, 32) * K[0][i] + to_double(9, 32) * K[1][i];
+    f(t + to_double(3, 8) * tau, outXY, move_time, F, vec, s);
+    K[2][0] = tau * F[0];
+    K[2][1] = tau * F[1];
+    K[2][2] = tau * F[2];
+    K[2][3] = tau * F[3];
+    K[2][4] = tau * F[4];
+    K[2][5] = tau * F[5];
 
     //K4 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i] + to_double(1932, 2197) * K[0][i] - to_double(7200, 2197) * K[1][i] + to_double(7296, 2197) * K[2][i];
-    f(t + to_double(12, 13) * step, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[3][i] = step * F[i];;
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i] + to_double(1932, 2197) * K[0][i] - to_double(7200, 2197) * K[1][i] + to_double(7296, 2197) * K[2][i];
+    f(t + to_double(12, 13) * tau, outXY, move_time, F, vec, s);
+    K[3][0] = tau * F[0];
+    K[3][1] = tau * F[1];
+    K[3][2] = tau * F[2];
+    K[3][3] = tau * F[3];
+    K[3][4] = tau * F[4];
+    K[3][5] = tau * F[5];
 
     //K5 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i] + to_double(439, 216) * K[0][i] - ((double)(8)) * K[1][i] + to_double(3680, 513) * K[2][i] - to_double(845, 4104) * K[3][i];
-    f(t + step, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[4][i] = step * F[i];
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i] + to_double(439, 216) * K[0][i] - ((double)(8)) * K[1][i] + to_double(3680, 513) * K[2][i] - to_double(845, 4104) * K[3][i];
+    f(t + tau, outXY, move_time, F, vec, s);
+    K[4][0] = tau * F[0];
+    K[4][1] = tau * F[1];
+    K[4][2] = tau * F[2];
+    K[4][3] = tau * F[3];
+    K[4][4] = tau * F[4];
+    K[4][5] = tau * F[5];
 
     //K6 calculating
-    for (int i = 0; i < dimension; i++) outXY[i] = XY[i] - to_double(8, 27) * K[0][i] + ((double)(2)) * K[1][i] - to_double(3544, 2565) * K[2][i] + to_double(1859, 4104) * K[3][i] - to_double(11, 40) * K[4][i];
-    f(t + to_double(1, 2) * step, outXY, tEnd, s, F, vector, n);
-    for(int i = 0; i < dimension; i++) K[5][i] = step * F[i];
+    for (int i = 0; i < dim; i++) outXY[i] = atom_coordinates[i] - to_double(8, 27) * K[0][i] + ((double)(2)) * K[1][i] - to_double(3544, 2565) * K[2][i] + to_double(1859, 4104) * K[3][i] - to_double(11, 40) * K[4][i];
+    f(t + to_double(1, 2) * tau, outXY, move_time, F, vec, s);
+    K[5][0] = tau * F[0];
+    K[5][1] = tau * F[1];
+    K[5][2] = tau * F[2];
+    K[5][3] = tau * F[3];
+    K[5][4] = tau * F[4];
+    K[5][5] = tau * F[5];
 
     //Result
-    for (int i = 0; i < dimension; i++) XY[i] += to_double(16, 135) * K[0][i] + to_double(6656, 12825) * K[2][i] + to_double(28561, 56430) * K[3][i] - to_double(9, 50) * K[4][i] + to_double(2, 55) * K[5][i];
+    for (int i = 0; i < dim; i++) atom_coordinates[i] += to_double(16, 135) * K[0][i] + to_double(6656, 12825) * K[2][i] + to_double(28561, 56430) * K[3][i] - to_double(9, 50) * K[4][i] + to_double(2, 55) * K[5][i];
 }
 
-
-__device__ void rungeKutta(double t0, double* XY, double tEnd, double s, double* vector, int n)
+__device__ void rungeKutta(double s, double move_time, double* atom_coordinates, double t0, double tau, double* vec)
 {
-    while (t0 < tEnd)
+    while (t0 < move_time)
     {
-        double step = tau;
-        if (step >= (tEnd - t0)) step = tEnd - t0;
-        increment(t0, XY, tEnd, s, step, vector, n);
-        t0 += step;
+        if (tau >= (move_time - t0)) tau = move_time - t0;
+        increment(t0, atom_coordinates, move_time, s, tau, vec);
+        t0 += tau;
     }
 }
 
 
-__device__ double energy(double* XY, double tEnd, double s, double* vector, int n)
+__device__ double energy(double* coord, double move_time, double* vec, double s)
 {
-    return (pow((XY[1]),2) + pow(XY[3],2) + pow(XY[5],2))* CONST_E - U * pow((w0/w(XY[4])),2)*exp_func(XY[0]-P(tEnd, vector, n, tEnd, s),XY[2],XY[4]);
+    double dx = P(move_time,vec,move_time,s);
+    return (pow((coord[1]), 2) + pow(coord[3], 2) + pow(coord[5], 2)) + eq_const * potential(coord[0]-dx,coord[2],coord[4]);
 }
 
 
-__device__ double newton_search(double a, double b, double s, double* vector, int n)
+__device__ double newton_search(double a, double b, double EPS, double* vec, double s)
 {
     double Xnn = 3 * EPS, Xn = b, X = EPS;
     while (fabs(Xnn - X) > EPS) {
         X = Xn;
-        Xnn = Xn - ((p(Xn, vector, n) - s) / dp(Xn, vector, n));
+        Xnn = Xn - ((p(Xn, vec) - s) / dp(Xn, vec));
         Xn = Xnn;
     };
     return Xnn;
 }
 
 
-__device__ double get_tEnd(double s, double Tmax, double* vector, int n)
+__device__ double get_move_time(double s, double Tmax, double tau, double EPS, double* vec)
 {
-    double ans, t = 0, step = tau;
+    double ans, t = 0;
     while (t < Tmax)
     {
-        if (step >= (Tmax - t)) step = Tmax - t;
-        if ((p(t, vector, n) - s / 2.0) * (p(t + step, vector, n) - s / 2.0) <= 0)
+        if (tau >= (Tmax - t)) tau = Tmax - t;
+        if ((p(t, vec) - s / 2.0) * (p(t + tau, vec) - s / 2.0) <= 0)
         {
-            ans = newton_search(t, t + step, s / 2.0, vector, n);
+            ans = newton_search(t, t + tau, EPS, vec, s / 2.0);
             return 2 * ans;
         }
-        if (p(t, vector, n) > p(t + step, vector, n)) return -1;
-        t += step;
+        if (p(t, vec) > p(t + tau, vec)) return -1;
+        t += tau;
     }
     return -1;
 }
 
 
-__device__ double optimization_f(double s, double* E, double* vector, int n)
+__device__ double optimization_f(double s, double* E, double* vec)
 {
-    double tEnd = 0, Tmax = CONST_k * s + CONST_b;
-    tEnd = get_tEnd(s, Tmax, vector, n);
-    if (tEnd != -1)
+    double move_time = 0, tau = 0.01, EPS = 1e-06, lim = 0.88664120885, Tmax = 20;//0.07218 * s + 1.46378;///////!!!!!!!
+    move_time = get_move_time(s, Tmax, tau, EPS, vec);
+    if (move_time != -1)
     {
-        double XY[dimension] = { 0 }, t0 = 0;
-        rungeKutta(t0, XY, tEnd, s, vector, n);
-        *E = energy(XY, tEnd, s, vector, n);
-        //printf("XY = %lf,%lf,%lf,%lf,%lf,%lf\tS = %lf \t Tmax = %lf\t  tEnd = %lf \t Energy = %lf\t vector = %lf, %lf, %lf, %lf, %lf\n",XY[0],XY[1],XY[2],XY[3],XY[4],XY[5],s,Tmax, tEnd, *E, vector[0], vector[1], vector[2], vector[3], vector[4]);
-        if (*E < (-lim * U)) return tEnd;
+        double coord[dim] = {0}, t0 = 0;
+        rungeKutta(s, move_time, coord, t0, tau, vec);
+        *E = energy(coord, move_time, vec, s);
+        if (*E < (-lim * U0 * eq_const)) return move_time;
     }
     return -1;
 }
 
 
-__global__ void distributor(double s, double* array, double* output, int n, int N)
+__global__ void distributor(double s, double* data, double* output, int max_thread)
 {
     int threadLinearIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (threadLinearIdx < N)
+    if (threadLinearIdx < max_thread)
     {
         //if (threadLinearIdx % 10000 == 0) printf("%.1f%% done\n", 100 * float(threadLinearIdx) / float(N));
-        double tEnd, E;
-        double* vector = (double*)malloc(n * sizeof(double));
-        for (int i = 0; i < n; i++) vector[i] = array[threadLinearIdx * n + i];
-        tEnd = optimization_f(s, &E, vector, n);
-        output[2 * threadLinearIdx] = tEnd;
-        output[2 * threadLinearIdx + 1] = E;
-        free(vector);
+        double move_time, end_energy;
+        double* vec = (double*)malloc(vec_size * sizeof(double));
+        for (int i = 0; i < vec_size; i++) vec[i] = data[threadLinearIdx * vec_size + i];
+        move_time = optimization_f(s, &end_energy, vec);
+        output[2 * threadLinearIdx] = move_time;
+        output[2 * threadLinearIdx + 1] = end_energy;
+        free(vec);
     }
 }
 
 
-__device__ double get_P(double s, double* initials, int init_N, double tEnd, double* avarage_E, double* vector, int n)
+__device__ double get_P(double s, double* sample, int sample_size, double move_time, double* avarage_energy, double* vec)
 {
-    double XY[dimension] = { 0 }, Ep, t0 = 0;
+    double coord[dim]={0}, t0 = 0, current_energy = 0, tau = 0.01;
     double successes = 0;
-    *avarage_E = 0;
-    for (int i = 0; i < init_N; i++)
+    *avarage_energy = 0;
+    for (int i = 0; i < sample_size; i++)
     {
-        for (int j = 0; j < dimension; j++) XY[j] = initials[i * dimension + j];
-        rungeKutta(t0, XY, tEnd, s, vector, n);
-        Ep = energy(XY, tEnd, s, vector, n);
-        if (Ep < 0)
+        for (int j = 0; j < dim; j++) coord[j] = sample[i * dim + j];
+        rungeKutta(s, move_time, coord, t0, tau, vec);
+        current_energy = energy(coord, move_time, vec, s);
+        if (current_energy < 0)
         {
-            *avarage_E += Ep;
+            *avarage_energy += current_energy;
             successes++;
         }
     }
-    if (!successes) *avarage_E = 0;
-    else *avarage_E = *avarage_E / successes;
-    return successes / double(init_N);
+    if (!successes) *avarage_energy = 0;
+    else *avarage_energy = *avarage_energy / successes;
+    return successes / double(sample_size);
 }
 
 
-__global__ void distributor_P(double s, double* array, double* initials, double* output, int init_N, int n, int N)
+__global__ void distributor_P(double s, double* data, double* sample, double* output, int sample_size, int max_thread)
 {
     int threadLinearIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (threadLinearIdx < N)
+    if (threadLinearIdx < max_thread)
     {
         //Проверка без начальных условий
-        if (threadLinearIdx % 10 == 0) printf("%.1lf mkm|| \t %.1f%% progress\n", s, 100 * float(threadLinearIdx) / float(N));
-        double tEnd, E, P = 0, avarage_E = 0;
-        double* vector = (double*)malloc(n * sizeof(double));
-        for (int i = 0; i < n; i++) vector[i] = array[threadLinearIdx * n + i];
-        tEnd = optimization_f(s, &E, vector, n);
+        if (threadLinearIdx % 10 == 0) printf("%.1lf mkm|| \t %.1f%% progress\n", s, 100 * float(threadLinearIdx) / float(max_thread));
+        double move_time, energy_based, probability = 0, avarage_energy = 0;
+        double* vec = (double*)malloc(vec_size * sizeof(double));
+        for (int i = 0; i < vec_size; i++) vec[i] = data[threadLinearIdx * vec_size + i];
+        move_time = optimization_f(s, &energy_based, vec);
 
+        if (move_time != -1) probability = get_P(s, sample, sample_size, move_time, &avarage_energy, vec);
 
-        if (tEnd != -1) P = get_P(s, initials, init_N, tEnd, &avarage_E, vector, n);
-
-        output[4 * threadLinearIdx + 0] = tEnd;
-        output[4 * threadLinearIdx + 1] = E;
-        output[4 * threadLinearIdx + 2] = P;
-        output[4 * threadLinearIdx + 3] = avarage_E;
-        free(vector);
+        output[vec_size * threadLinearIdx + 0] = move_time;
+        output[vec_size * threadLinearIdx + 1] = energy_based;
+        output[vec_size * threadLinearIdx + 2] = probability;
+        output[vec_size * threadLinearIdx + 3] = avarage_energy;
+        free(vec);
     }
 }
 
@@ -296,14 +301,14 @@ double randnum_normal(double mu, double sigma)
 }
 
 
-int find(double** array, int N, double* vector, int n)
+int find(double** data, int N, double* vec, int n)
 {
     for (int i = 0; i < N; i++)
     {
         for (int j = 0; j < n; j++)
         {
-            if (array[i][j] != vector[j]) break;
-            if ((j == (n - 1)) && (array[i][n - 1] == vector[n - 1])) return 1;
+            if (data[i][j] != vec[j]) break;
+            if ((j == (n - 1)) && (data[i][n - 1] == vec[n - 1])) return 1;
         }
     }
     return 0;
@@ -325,7 +330,7 @@ void calculate_p_e(double S, int alive_cnt)
         exit(2);
     }
     int size;
-    size = alive_cnt * vec;
+    size = alive_cnt * vec_size;
     double* data = (double*)malloc(size * sizeof(double));
     for (int i = 0; i < size; i++) fscanf(file, "%lf", &data[i]);
     fclose(file);
@@ -341,15 +346,15 @@ void calculate_p_e(double S, int alive_cnt)
     }
     int init_population;
     fscanf(file, "%d", &init_population);
-    int Np = 6 * init_population * sizeof(double);
+    int Np = 4 * init_population * sizeof(double);
     double* data_init = (double*)malloc(Np);
-    for (int i = 0; i < 6 * init_population; i++) fscanf(file, "%lf", &data_init[i]);
+    for (int i = 0; i < 4 * init_population; i++) fscanf(file, "%lf", &data_init[i]);
     fclose(file);
     printf("Reading have done\n");
     printf("============================================\n");
 
     //Часть CUDA
-    int n = vec;       // степень полинома
+    int n = vec_size;       // степень полинома
     int N = alive_cnt;   // количество векторов
     int nb = size * sizeof(double);      // размер входного полиномов массива в байтах
     int Nb = 4 * N * sizeof(double);     // размер выходного массива полиномов в байтах
@@ -374,7 +379,7 @@ void calculate_p_e(double S, int alive_cnt)
     cudaMemcpy(inputInitialDataOnDevice, inputInitialDataOnHost, Np, cudaMemcpyHostToDevice);
 
     //запуск ядра
-    distributor_P << <4096, 256 >> > (S, inputDataOnDevice, inputInitialDataOnDevice, resultOnDevice, init_population, n, N);
+    distributor_P << <40960, 256 >> > (S, inputDataOnDevice, inputInitialDataOnDevice, resultOnDevice, init_population, N);
 
     //копирование результатов на хост и привязка к указателю тут resultOnHost
     cudaMemcpy(resultOnHost, resultOnDevice, Nb, cudaMemcpyDeviceToHost);
@@ -410,7 +415,7 @@ void calculate_p_e(double S, int alive_cnt)
         if (resultOnHost[4 * i] != -1)
         {
             fprintf(file, "%lf %lf %lf %lf ", resultOnHost[4 * i], resultOnHost[4 * i + 1], resultOnHost[4 * i + 2], resultOnHost[4 * i + 3]);
-            for (int j = 0; j < vec; j++) fprintf(file, "%lf ", inputDataOnHost[i * vec + j]);
+            for (int j = 0; j < vec_size; j++) fprintf(file, "%lf ", inputDataOnHost[i * vec_size + j]);
             fprintf(file, "\n ");
             coun++;
         }
@@ -434,11 +439,11 @@ int grid_method(double S, int era_cnt, double* init_vector)
     fclose(file);
 
     //часть CUDA
-    const int nb = vec * population * sizeof(double); // размер входного массива в байтах
+    const int nb = vec_size * population * sizeof(double); // размер входного массива в байтах
     const int Nb = 2 * population * sizeof(double);   // размер выходного массива в байтах
 
     //выходной массив на хосте
-    double* inputDataOnHost = (double*)malloc(vec * population * sizeof(double));
+    double* inputDataOnHost = (double*)malloc(vec_size * population * sizeof(double));
 
     //результат на хосте
     double* resultOnHost = (double*)malloc(Nb);
@@ -450,8 +455,8 @@ int grid_method(double S, int era_cnt, double* init_vector)
 
     //часть сеточного метода
     //инициализация шага сетки
-    double grid[vec];
-    for (int i = 0; i < vec; i++) grid[i] = grid_step;
+    double grid[vec_size];
+    for (int i = 0; i < vec_size; i++) grid[i] = grid_step;
 
     //количесво живых точек вокруг одной точки сетки
     int alive_points = 0;
@@ -461,39 +466,43 @@ int grid_method(double S, int era_cnt, double* init_vector)
     //далее везде "указатели" cnt показывают текущее КОЛ-ВО элементов в массиве
     //точки сетки, которые уже были проверены
     double** checked_grid;
-    int size = 1000 * population; //текущий размер массива на случай если он начнет переполняться               //ОНО ТАМ ВНИЗУ НЕ БУДЕТ РАБОТАТЬ ПЗДЦ
+    int size = 10000 * population; //текущий размер массива на случай если он начнет переполняться               //ОНО ТАМ ВНИЗУ НЕ БУДЕТ РАБОТАТЬ ПЗДЦ
     checked_grid = (double**)malloc(size * sizeof(double**));
-    for (int i = 0; i < size; i++) checked_grid[i] = (double*)malloc(vec * sizeof(double*));
+    for (int i = 0; i < size; i++) checked_grid[i] = (double*)malloc(vec_size * sizeof(double*));
     int checked_grid_cnt = 1;
 
 
     //точки для проверки в текущем цикле (массив заполняется в предыдущем цикле)
     double** target_grid = (double**)malloc(size_target * sizeof(double**));
-    for (int i = 0; i < size_target; i++) target_grid[i] = (double*)malloc(vec * sizeof(double*));
+    for (int i = 0; i < size_target; i++) target_grid[i] = (double*)malloc(vec_size * sizeof(double*));
     int target_grid_cnt = 1;
 
 
     //точки для проверки в следующем цикле (массив заполняется в текущем цикле)
     double** next_target_grid = (double**)malloc(size_target * sizeof(double**));
-    for (int i = 0; i < size_target; i++) next_target_grid[i] = (double*)malloc(vec * sizeof(double*));
+    for (int i = 0; i < size_target; i++) next_target_grid[i] = (double*)malloc(vec_size * sizeof(double*));
     int next_target_grid_cnt = 0;
 
 
     //вспомогательный массив для хранения ближайшей точки сетки для данного вектора
-    double near_point[vec] = { 0 };
+    double near_point[vec_size] = { 0 };
 
     //инициализация начального вектора
     //и одновременно добавляем его в массив проверенных
-    for (int i = 0; i < vec; i++)
+    for (int i = 0; i < vec_size; i++)
     {
         target_grid[0][i] = init_vector[i];
         checked_grid[0][i] = init_vector[i];
     }
 
     //цикл поиска точек фигуры на протяжении era_cnt
+    //счетчик популяций
+    //int era = 0;
+
+    //цикл поиска всех точек фигуры
     for (int era = 0; era < era_cnt; era++)
     {
-		if(!target_grid_cnt) break;
+        if(!target_grid_cnt) break;
         //ифнормация
         printf("============================================\n\t\tEra %d\n", era + 1);
         printf("============================================\n");
@@ -505,9 +514,9 @@ int grid_method(double S, int era_cnt, double* init_vector)
             for (int j = 0; j < population; j++)
             {
                 //цикл пробегает по одному вектору из популяции
-                for (int k = 0; k < vec; k++)
+                for (int k = 0; k < vec_size; k++)
                 {
-                    inputDataOnHost[j * vec + k] = randnum_normal(target_grid[q][k], grid[k]);
+                    inputDataOnHost[j * vec_size + k] = randnum_normal(target_grid[q][k], grid[k]);
                 }
             }
 
@@ -515,8 +524,8 @@ int grid_method(double S, int era_cnt, double* init_vector)
             //копирование данных на GPU и привязка указателю там к inputDataOnDevice
             cudaMemcpy(inputDataOnDevice, inputDataOnHost, nb, cudaMemcpyHostToDevice);
 
-            //запуск ядра
-            distributor << <4096, 256 >> > (S, inputDataOnDevice, resultOnDevice, vec, population);
+            //запуск ядра  2097152
+            distributor << <40960, 256 >> > (S, inputDataOnDevice, resultOnDevice, population);
 
             //копирование результатов на хост и привязка к указателю тут resultOnHost
             cudaMemcpy(resultOnHost, resultOnDevice, Nb, cudaMemcpyDeviceToHost);
@@ -525,7 +534,7 @@ int grid_method(double S, int era_cnt, double* init_vector)
 
             //смотрим результаты проверки
             for (int j = 0; j < population; j++) if (resultOnHost[2 * j] != -1) alive_points++;
-            printf("Era %d / %d \t Grid-point %d / %d\t%d alive points around\n", era + 1, era_cnt, q, target_grid_cnt - 1, alive_points);
+            printf("Era %d \t Grid-point %d / %d\t%d alive points around\n", era + 1, q, target_grid_cnt - 1, alive_points);
             alive_points = 0;
 
 
@@ -549,20 +558,20 @@ int grid_method(double S, int era_cnt, double* init_vector)
                 {
                     //записываем живую точку в файл
                     fprintf(file, "%lf %lf ", resultOnHost[2 * i], resultOnHost[2 * i + 1]);
-                    for (int j = 0; j < vec; j++) fprintf(file, "%lf ", inputDataOnHost[i * vec + j]);
+                    for (int j = 0; j < vec_size; j++) fprintf(file, "%lf ", inputDataOnHost[i * vec_size + j]);
                     fprintf(file, "\n");
                     alive_cnt++;
 
                     //находим ближайшую точку сетки для данного вектора
-                    for (int j = 0; j < vec; j++) near_point[j] = get_nearest_coordinate(inputDataOnHost[i * vec + j], grid[j]);
+                    for (int j = 0; j < vec_size; j++) near_point[j] = get_nearest_coordinate(inputDataOnHost[i * vec_size + j], grid[j]);
 
                     //смотрим проверялась ли эта точка ранее
-                    if (!find(checked_grid, checked_grid_cnt, near_point, vec))
+                    if (!find(checked_grid, checked_grid_cnt, near_point, vec_size))
                     {
                         //если точка не проверялась, то добавляем её
                         //в список на проверку для слудующего цикла,
                         //а также добавляем её в массив проверенных точек
-                        for (int j = 0; j < vec; j++)
+                        for (int j = 0; j < vec_size; j++)
                         {
                             //список на следующую проверку
                             next_target_grid[next_target_grid_cnt][j] = near_point[j];
@@ -577,11 +586,13 @@ int grid_method(double S, int era_cnt, double* init_vector)
 
                     //увеличиваем массив проверенных точек на population,
                     //если он начинает переполняться
-                    if (size - 100 < checked_grid_cnt) ///ЭТО НЕ РАБОТАЕТ
+                    if (size - 100 < checked_grid_cnt)//ЭТО НЕ РАБОТАЕТ
                     {
-                        printf("\n\n\n%d\t%d\n\n\n", size - 100, checked_grid_cnt);
-                        size += population;
-                        checked_grid = (double**)realloc(checked_grid, size * sizeof(*checked_grid));
+                        printf("Space is over sorry bro :(\n");
+                        exit(2);
+                    //    printf("\n\n\n%d\t%d\n\n\n", size - 100, checked_grid_cnt);
+                    //    size += population;
+                    //    checked_grid = (double**)realloc(checked_grid, size * sizeof(*checked_grid));
                     }
                 }
             }
@@ -594,7 +605,7 @@ int grid_method(double S, int era_cnt, double* init_vector)
         for (int i = 0; i < target_grid_cnt; i++)
         {
             printf("Grid number %d \t vector:\t", i);
-            for (int j = 0; j < vec; j++)
+            for (int j = 0; j < vec_size; j++)
             {
                 target_grid[i][j] = next_target_grid[i][j];
                 printf("%lf\t", target_grid[i][j]);
@@ -606,6 +617,7 @@ int grid_method(double S, int era_cnt, double* init_vector)
         printf("Number of nodes to check %d\n", target_grid_cnt);
         printf("Total live points  %d\n", alive_cnt);
         printf("============================================\n\n\n\n");
+        era++;
     }
 
     //освобождение памяти на девайсе
@@ -628,7 +640,7 @@ void get_best_point(int alive_cnt, double* best_vector)
     //создаем массив для хранения всей информации о веекторах
     double** data;
     data = (double**)malloc(alive_cnt * sizeof(double**));
-    for (int i = 0; i < alive_cnt; i++) data[i] = (double*)malloc((4 + vec) * sizeof(double*));
+    for (int i = 0; i < alive_cnt; i++) data[i] = (double*)malloc((4 + vec_size) * sizeof(double*)); //ОЧЕНЬ ОПАСНАЯ 4 ТУТ СТОИТ
 
     //читаем данные из файла
     FILE* file;
@@ -640,7 +652,7 @@ void get_best_point(int alive_cnt, double* best_vector)
     }
     for (int i = 0; i < alive_cnt; i++)
     {
-        for (int j = 0; j < 4 + vec; j++)
+        for (int j = 0; j < 4 + vec_size; j++)
         {
             fscanf(file, "%lf", &data[i][j]);
         }
@@ -669,11 +681,11 @@ void get_best_point(int alive_cnt, double* best_vector)
     }
 
     //записываем лучшую точку
-    for (int i = 0; i < vec + 4; i++) best_vector[i] = data[number][i];
+    for (int i = 0; i < vec_size + 4; i++) best_vector[i] = data[number][i];
 
     //вывожу результат
     printf("Best vector:\n");
-    for (int i = 0; i < vec + 4; i++) printf("%lf\t", data[number][i]);
+    for (int i = 0; i < vec_size + 4; i++) printf("%lf\t", data[number][i]);
     printf("============================================\n\n\n\n");
     number = 0;
 }
@@ -681,9 +693,9 @@ void get_best_point(int alive_cnt, double* best_vector)
 
 int main()
 {
-    double init_vector[vec];
+    double init_vector[vec_size];
 	int alive_cnt;
-    double bestie[vec + 4];
+    double bestie[vec_size + 4];
     double S=Sinit;
 
     FILE* file;
@@ -697,7 +709,7 @@ int main()
     init_vector[4] = init_point_5;
     init_vector[5] = init_point_6;
 
-    while (S > Smax)
+    while (S <= Smax)
     {
 		printf("S = %lf\n", S);
 
@@ -714,12 +726,12 @@ int main()
             exit(2);
         }
         fprintf(file, "%lf\t", S);
-        for (int i = 0; i < vec + 4; i++) fprintf(file, "%lf ", bestie[i]);
+        for (int i = 0; i < vec_size + 4; i++) fprintf(file, "%lf ", bestie[i]);
         fprintf(file, "\n ");
         fclose(file);
 
         //Начальный вектор - лучший предыдущий
-        for (int i = 0; i < vec; i++) init_vector[i] = bestie[i + 4];
+        for (int i = 0; i < vec_size; i++) init_vector[i] = bestie[i + 4];
 
 
         //Новое расстояние

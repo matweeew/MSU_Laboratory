@@ -25,7 +25,7 @@
 
 /////////////////////////////////////////////////////////////////////
 //#define vec 4                   //НЕ ЗАБУДЬ ГЕНЕРАТОРЫ ПОПРАВИТЬ ТОГДА
-#define grid_step 5
+#define grid_step 10
 constexpr auto population = 1000;
 constexpr auto size_target = population * 100;
 /////////////////////////////////////////////////////////////////////
@@ -202,14 +202,14 @@ __device__ double get_move_time(double s, double Tmax, double tau, double EPS, d
 
 __device__ double optimization_f(double s, double* E, double* vec)
 {
-    double move_time = 0, tau = 0.01, EPS = 1e-06, lim = 0.88664120885, Tmax = 100;//0.07218 * s + 1.46378;///////!!!!!!!
+    double move_time = 0, tau = 0.01, EPS = 1e-06, lim = 0.88664120885, Tmax = 20;//0.07218 * s + 1.46378;///////!!!!!!!
     move_time = get_move_time(s, Tmax, tau, EPS, vec);
     if (move_time != -1)
     {
         double coord[dim] = {0}, t0 = 0;
         rungeKutta(s, move_time, coord, t0, tau, vec);
         *E = energy(coord, move_time, vec, s);
-        if (*E < (-lim * U0)) return move_time;
+        if (*E < (-lim * U0 * eq_const)) return move_time;
     }
     return -1;
 }
@@ -685,7 +685,7 @@ int main()
     double init_vector[] = { 0.691200, 38.850753, -168.382466, 176.389313, 0, 0 }; //лучшее для 3.0 и 35К
     int alive_cnt;
     double bestie[vec_size + 4];
-    double S = 3.0;
+    double S = 6.5;
 
     FILE* file;
     file = fopen("results.txt", "w");

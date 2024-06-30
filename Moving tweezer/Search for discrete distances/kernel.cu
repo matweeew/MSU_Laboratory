@@ -13,7 +13,7 @@
 
 
 #define grid_step 0.5
-#define number_of_eras 10                       //кол-во циклов (шагов) по сетке от начальной точки
+#define number_of_eras 5                       //кол-во циклов (шагов) по сетке от начальной точки
 constexpr auto population = 1000;
 constexpr auto size_target = population * 100;
 
